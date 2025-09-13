@@ -78,7 +78,8 @@ app.post("/sign-ses-request", (req, res) => {
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
       "X-Amz-Date": amzDate,
-      Authorization: authorization,
+      "Authorization": authorization,
+      "host": host // ✅ This line ensures signature validity
     },
     body,
   });
