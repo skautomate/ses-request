@@ -48,6 +48,8 @@ app.post("/sign-ses-request", (req, res) => {
       subject,
       body_text,
       body_html,
+      // --- UPDATE: Receive the new configuration_set_name from the request body ---
+      configuration_set_name,
     } = req.body || {};
 
     if (!aws_access_key_id || !aws_secret_access_key || !aws_region) {
@@ -82,6 +84,12 @@ app.post("/sign-ses-request", (req, res) => {
 
     if (normalizedHtml) {
       bodyParts.push(`Message.Body.Html.Data=${urlencodeFormComponent(normalizedHtml)}`);
+    }
+    
+    // --- UPDATE: If configuration_set_name exists, add it to the request body parts ---
+    // The official AWS API parameter name is 'ConfigurationSetName'
+    if (configuration_set_name) {
+        bodyParts.push(`ConfigurationSetName=${urlencodeFormComponent(configuration_set_name)}`);
     }
 
     const body = bodyParts.join("&");
@@ -126,14 +134,12 @@ app.post("/sign-ses-request", (req, res) => {
       `Signature=${signature}`;
 
     // Respond with signed headers and body
-    // Note: Most HTTP clients set Host automatically; include it only if your client requires it.
     res.json({
       endpoint,
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
         "X-Amz-Date": amzDate,
         "Authorization": authorization,
-        // "Host": host, // optional; uncomment only if your HTTP client doesn't set Host
       },
       body,
     });
