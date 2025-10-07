@@ -9,30 +9,18 @@ app.get("/health", (req, res) => {
   res.status(200).send("OK");
 });
 
-/**
- * Helper: HMAC SHA256
- */
 function hmac(key, data) {
   return crypto.createHmac("sha256", key).update(data).digest();
 }
 
-/**
- * Helper: SHA256 Hash Hex
- */
 function sha256Hex(data) {
   return crypto.createHash("sha256").update(data).digest("hex");
 }
 
-/**
- * URL encode for x-www-form-urlencoded safely
- */
 function urlencodeFormComponent(value) {
   return encodeURIComponent(value);
 }
 
-/**
- * Normalize newlines for SES friendliness
- */
 function normalizeNewlines(v) {
   return typeof v === "string" ? v.replace(/\r\n/g, "\n") : v;
 }
@@ -46,10 +34,11 @@ app.post("/sign-ses-request", (req, res) => {
       source,
       recipient,
       subject,
-      body_text,
       body_html,
-      // --- UPDATE: Receive the new configuration_set_name from the request body ---
       configuration_set_name,
+      custom_headers,
+      // --- 1. RECEIVE THE NEW PREHEADER ---
+      preheader,
     } = req.body || {};
 
     if (!aws_access_key_id || !aws_secret_access_key || !aws_region) {
@@ -64,10 +53,24 @@ app.post("/sign-ses-request", (req, res) => {
     const endpoint = `https://${host}/`;
 
     const now = new Date();
-    const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, ""); // e.g., 20250913T135959Z
-    const dateStamp = amzDate.slice(0, 8); // e.g., 20250913
+    const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
+    const dateStamp = amzDate.slice(0, 8);
 
-    // Build the x-www-form-urlencoded body with safe encoding
+    // --- 2. LOGIC TO ADD THE PREHEADER TO THE HTML ---
+    let finalHtml = normalizeNewlines(body_html);
+    if (preheader && finalHtml) {
+        // This is the standard way to add a preheader. It's a hidden element
+        // at the start of the body that email clients show in the preview.
+        const preheaderHtml = `
+          <div style="display: none; max-height: 0px; overflow: hidden;">
+            ${preheader}&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;
+          </div>
+        `;
+        // Insert it right after the opening <body> tag
+        finalHtml = finalHtml.replace(/<body.*?>/i, `$&${preheaderHtml}`);
+    }
+
+
     const bodyParts = [
       `Action=SendEmail`,
       `Source=${urlencodeFormComponent(source)}`,
@@ -75,65 +78,42 @@ app.post("/sign-ses-request", (req, res) => {
       `Message.Subject.Data=${urlencodeFormComponent(subject)}`,
     ];
 
-    const normalizedText = normalizeNewlines(body_text);
-    const normalizedHtml = normalizeNewlines(body_html);
-
-    if (normalizedText) {
-      bodyParts.push(`Message.Body.Text.Data=${urlencodeFormComponent(normalizedText)}`);
-    }
-
-    if (normalizedHtml) {
-      bodyParts.push(`Message.Body.Html.Data=${urlencodeFormComponent(normalizedHtml)}`);
+    if (finalHtml) {
+      bodyParts.push(`Message.Body.Html.Data=${urlencodeFormComponent(finalHtml)}`);
     }
     
-    // --- UPDATE: If configuration_set_name exists, add it to the request body parts ---
-    // The official AWS API parameter name is 'ConfigurationSetName'
     if (configuration_set_name) {
-        bodyParts.push(`ConfigurationSetName=${urlencodeFormComponent(configuration_set_name)}`);
+      bodyParts.push(`ConfigurationSetName=${urlencodeFormComponent(configuration_set_name)}`);
+    }
+
+    if (custom_headers && typeof custom_headers === 'object') {
+        let headerIndex = 1;
+        for (const [name, value] of Object.entries(custom_headers)) {
+            bodyParts.push(`Headers.member.${headerIndex}.Name=${urlencodeFormComponent(name)}`);
+            bodyParts.push(`Headers.member.${headerIndex}.Value=${urlencodeFormComponent(value)}`);
+            headerIndex++;
+        }
     }
 
     const body = bodyParts.join("&");
 
-    // Create canonical request
+    // The rest of the signing logic remains exactly the same
     const canonicalHeaders =
       `content-type:application/x-www-form-urlencoded\n` +
       `host:${host}\n` +
       `x-amz-date:${amzDate}\n`;
-
     const signedHeaders = "content-type;host;x-amz-date";
-
-    const canonicalRequest = [
-      "POST",
-      "/",
-      "",
-      canonicalHeaders,
-      signedHeaders,
-      sha256Hex(body),
-    ].join("\n");
-
-    // Create string to sign
+    const canonicalRequest = ["POST", "/", "", canonicalHeaders, signedHeaders, sha256Hex(body)].join("\n");
     const credentialScope = `${dateStamp}/${aws_region}/${service}/aws4_request`;
-    const stringToSign = [
-      "AWS4-HMAC-SHA256",
-      amzDate,
-      credentialScope,
-      sha256Hex(canonicalRequest),
-    ].join("\n");
-
-    // Calculate signature
+    const stringToSign = ["AWS4-HMAC-SHA256", amzDate, credentialScope, sha256Hex(canonicalRequest)].join("\n");
     const kDate = hmac(`AWS4${aws_secret_access_key}`, dateStamp);
     const kRegion = hmac(kDate, aws_region);
     const kService = hmac(kRegion, service);
     const kSigning = hmac(kService, "aws4_request");
     const signature = crypto.createHmac("sha256", kSigning).update(stringToSign).digest("hex");
-
     const authorization =
-      `AWS4-HMAC-SHA256 ` +
-      `Credential=${aws_access_key_id}/${credentialScope}, ` +
-      `SignedHeaders=${signedHeaders}, ` +
-      `Signature=${signature}`;
+      `AWS4-HMAC-SHA256 Credential=${aws_access_key_id}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
 
-    // Respond with signed headers and body
     res.json({
       endpoint,
       headers: {
